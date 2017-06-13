@@ -20,6 +20,7 @@
 #include <arpa/inet.h>
 #include <syslog.h>
 
+/* Macro for unused variables */
 #define UNUSED(x) (void)(x)
 
 /* Error codes */
@@ -50,9 +51,9 @@ struct sys_cpu_info {
     long long guest_nice;
 };
 
+/* Prev version of measured CPU times */
 long long prev_cpu_idle_time = 0;
 long long prev_cpu_non_idle_time = 0;
-
 
 /* Memory info - parsed from /proc/meminfo */
 struct sys_mem_info {
@@ -63,7 +64,6 @@ struct sys_mem_info {
     unsigned long mem_cached;
 };
 
-
 /**
  * @brief      Gets the total CPU usage percentage computed from /proc/stat file
  * @return     The total CPU usage
@@ -72,6 +72,8 @@ char *get_cpu_usage()
 {
     char *result;
     struct sys_cpu_info cpuinfo;
+
+    /* Open /proc/stat file */
     FILE *cpu_f = fopen("/proc/stat", "r");
     if (cpu_f == NULL) {
         syslog(LOG_ERR, "Could not open /proc/stat file");
@@ -88,6 +90,7 @@ char *get_cpu_usage()
     }
     fclose(cpu_f);
 
+    /* Parse first line of /proc/stat file */
     sscanf(buffer,
            "cpu  %lld %lld %lld %lld %lld %lld %lld %lld %lld %lld",
            &cpuinfo.user, &cpuinfo.nice, &cpuinfo.system, &cpuinfo.idle, &cpuinfo.iowait,
@@ -141,7 +144,6 @@ int get_mem_usage_num(char *line)
     return result;
 }
 
-
 /**
  * @brief      Gets the memory usage
  * @return     The memory usage or NULL in case of error
@@ -155,6 +157,7 @@ char *get_memory_usage()
     int mem_used;
     char *result;
 
+    /* Open /proc/meminfo file */
     if ((mem_f = fopen("/proc/meminfo", "r")) == NULL) {
         syslog(LOG_ERR, "Could not open /proc/meminfo file");
         return NULL;
@@ -194,7 +197,6 @@ char *get_memory_usage()
     fclose(mem_f);
     return result;
 }
-
 
 /**
  * @brief      Parse and execute received command
@@ -294,7 +296,6 @@ static void daemonize()
     /* Open the log file */
     openlog("simple_linux_daemon", LOG_PID, LOG_DAEMON);
 }
-
 
 /**
  * @brief      Handles a TCP connection properties
