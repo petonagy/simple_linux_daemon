@@ -3,9 +3,11 @@
  *
  * File:           daemon.c
  * Project:        Simple linux daemon
- * Description:    Simple linux daemon communicating over network
+ * Description:    Simple linux daemon communicating over network using TCP protocol
  * Date:           13.6.2017
  */
+
+#define _GNU_SOURCE
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -27,6 +29,41 @@
 #define ERR_COMM 4
 
 #define PORT_NUM 5001
+#define BUFFER_SIZE 512
+#define TOK_DELIM " \t\r\n\a"
+
+/* Global variables */
+int listenfd = 0, connfd = 0;
+
+/* Memory info - parsed from /proc/meminfo */
+struct sys_mem_info {
+    unsigned int mem_total;
+    unsigned int mem_free;
+    unsigned int mem_available;
+    unsigned int mem_buffered;
+    unsigned int mem_cached;
+};
+
+/* Get memory usage number from a line in kB */
+int get_mem_usage_num(char *line)
+{
+    char *token;
+    int position = 0;
+    int result = 0;
+
+    token = strtok(line, TOK_DELIM);
+    while (token != NULL) {
+
+        /* Number is in second column in /proc/meminfo */
+        if (position == 1) {
+            result = atoi(token);
+        }
+
+        position++;
+        token = strtok(NULL, TOK_DELIM);
+    }
+    return result;
+}
 
 char *get_cpu_usage()
 {
@@ -35,12 +72,97 @@ char *get_cpu_usage()
 
 char *get_memory_usage()
 {
+    FILE *mem_f;
+    char *line = NULL;
+    size_t len = 0;
+    struct sys_mem_info meminfo;
+    int mem_used;
+    char *result;
+
+    if ((mem_f = fopen("/proc/meminfo", "r")) == NULL) {
+        return NULL;
+    }
+
+    /* Parsing only the first five lines of /proc/meminfo */
+    for (int i = 0; i < 5; ++i) {
+        if (getline(&line, &len, mem_f) == -1) {
+            fprintf(stderr, "Error on parsing a /proc/meminfo file");
+            fclose(mem_f);
+            return NULL;
+        }
+
+        switch(i) {
+            case 0:
+                meminfo.mem_total = get_mem_usage_num(line);
+                break;
+            case 1:
+                meminfo.mem_free = get_mem_usage_num(line);
+                break;
+            case 2:
+                meminfo.mem_available = get_mem_usage_num(line);
+                break;
+            case 3:
+                meminfo.mem_buffered = get_mem_usage_num(line);
+                break;
+            case 4:
+                meminfo.mem_cached = get_mem_usage_num(line);
+                break;
+        }
+    }
+
+    /* Compute memory usage */
+    mem_used = meminfo.mem_total - meminfo.mem_free - meminfo.mem_buffered - meminfo.mem_cached;
+    asprintf(&result, "%d", mem_used);
+
+    fclose(mem_f);
+    return result;
+}
+
+char *par_exec_command(char *buffer)
+{
+
+    if (strncmp(buffer, "cpu\r", 4) == 0) {
+        return get_cpu_usage();
+    } else if (strncmp(buffer, "mem\r", 4) == 0) {
+        return get_memory_usage();
+    }
+
     return NULL;
 }
 
-void parse_command()
+void *server_run()
 {
+    int socket_id = connfd;
+    char recv_buffer[BUFFER_SIZE];
+    memset(recv_buffer, '\0', sizeof(recv_buffer));
 
+    /* Read message from client */
+    if (read(socket_id, recv_buffer, sizeof(recv_buffer)) < 0) {
+        fprintf(stderr, "Error on read\n");
+        return NULL;
+    }
+
+    /* Parse and execute received command */
+    char *send_buffer = par_exec_command(recv_buffer);
+    if (send_buffer == NULL) {
+        asprintf(&send_buffer, "Invalid command!\n");
+    }
+
+    /* Send a reply to a client */
+    if ( write(socket_id, send_buffer, strlen(send_buffer) * sizeof(char) ) < 0 ) {
+        fprintf(stderr, "Error on write\n");
+        free(send_buffer);
+        return NULL;
+    }
+    free(send_buffer);
+    
+    // /* close connection, clean up socket */
+    if (close(socket_id) < 0) {
+        fprintf(stderr, "Error on close");
+        return NULL;
+    }
+
+    return NULL;
 }
 
 static void daemonize()
@@ -121,14 +243,20 @@ int create_connection(const int port_num, struct sockaddr_in *sin, int *listenfd
         return ERR_COMM;
     }
 
-    return 0;
+    return ERR_OK;
 }
 
 int main(int argc, char const *argv[])
 {
-    int listenfd = 0, connfd = 0;
     unsigned int sinlen;
     struct sockaddr_in sin;
+
+    /* Thread variables */
+    pthread_t thread_id;
+    int status;
+    void *result;
+    int res;
+    pthread_attr_t attr;
 
     /* Parse arguments - no agruments needed or alowed */
     if (argc > 1) {
@@ -146,6 +274,18 @@ int main(int argc, char const *argv[])
     }
     sinlen = sizeof(sin);
 
+    /* Creating implicit attribute */
+    if ((res = pthread_attr_init(&attr)) != 0) {
+        printf("pthread_attr_init() err %d\n", res);
+        return 1;
+    }
+
+    /* Type of thread in atributes */
+    if ((res = pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED)) != 0) {
+        printf("pthread_attr_setdetachstate() err %d\n", res);
+        return 1;
+    } 
+
     /* Server infinite loop */
     while(1) {
 
@@ -157,34 +297,12 @@ int main(int argc, char const *argv[])
         }
 
         /* Create a new thread */
-
-        int socket_id = connfd;
-        char recv_buffer[1024];
-        memset(recv_buffer, '0', sizeof(recv_buffer));
-
-        /* Read message from client */
-        if (read(socket_id, recv_buffer, sizeof(recv_buffer) ) < 0) {
-            fprintf(stderr, "error on read\n");
-            return ERR_COMM;
+        status = pthread_create(&thread_id, &attr, &server_run, NULL);
+        if (status != 0) {
+            return ERR_MEM;
         }
-
-        /* Send a reply to a client */
-        char *send_buffer = "Test message\n";
-        if ( write(socket_id, send_buffer, strlen(send_buffer) * sizeof(char) ) < 0 ) {
-            fprintf(stderr, "error on write\n");
-            return ERR_COMM;
-        }
-        
-        /* close connection, clean up sockets */
-        if (close(socket_id) < 0) {
-            fprintf(stderr, "error on close");
-            return ERR_COMM;
-        } 
-
-        // Free memory
-        // free(send_buffer);
 
     }
 
-    return EXIT_SUCCESS;
+    return ERR_OK;
 }

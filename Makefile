@@ -10,12 +10,12 @@ FILE_SOURCES    = daemon.c
 
 FLAGS           = -g -std=gnu99 -Wall -Wextra -pedantic
 
-LIBRARIES       = -lpcap
+LIBRARIES       = -lpthread
 
 CC              = gcc
 
 $(FILE): $(FILE_SOURCES)
-	$(CC) $(FLAGS) $< -o $@
+	$(CC) $(FLAGS) $(LIBRARIES) $< -o $@
 
 clean:
 	rm -f $(FILE)
