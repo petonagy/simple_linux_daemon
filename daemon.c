@@ -18,6 +18,7 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <syslog.h>
 
 #define UNUSED(x) (void)(x)
 
@@ -37,17 +38,21 @@ int listenfd = 0, connfd = 0;
 
 /* CPU usage info - parsed from /proc/stat */
 struct sys_cpu_info {
-    unsigned long long user;
-    unsigned long long nice;
-    unsigned long long system;
-    unsigned long long idle;
-    unsigned long long iowait;
-    unsigned long long irq;
-    unsigned long long softirq;
-    unsigned long long steal;
-    unsigned long long guest;
-    unsigned long long guest_nice;
+    long long user;
+    long long nice;
+    long long system;
+    long long idle;
+    long long iowait;
+    long long irq;
+    long long softirq;
+    long long steal;
+    long long guest;
+    long long guest_nice;
 };
+
+long long prev_cpu_idle_time = 0;
+long long prev_cpu_non_idle_time = 0;
+
 
 /* Memory info - parsed from /proc/meminfo */
 struct sys_mem_info {
@@ -69,33 +74,45 @@ char *get_cpu_usage()
     struct sys_cpu_info cpuinfo;
     FILE *cpu_f = fopen("/proc/stat", "r");
     if (cpu_f == NULL) {
-        perror("Could not open /proc/stat file");
+        syslog(LOG_ERR, "Could not open /proc/stat file");
         return NULL;
     }
 
     /* Read first line of the file */
     char buffer[1024];
-    char* ret = fgets(buffer, sizeof(buffer) - 1, cpu_f);
+    char *ret = fgets(buffer, sizeof(buffer) - 1, cpu_f);
     if (ret == NULL) {
-        perror("Could not read /proc/stat file");
+        syslog(LOG_ERR, "Could not read /proc/stat file");
         fclose(cpu_f);
         return NULL;
     }
     fclose(cpu_f);
 
     sscanf(buffer,
-           "cpu  %16llu %16llu %16llu %16llu %16llu %16llu %16llu %16llu %16llu %16llu",
+           "cpu  %lld %lld %lld %lld %lld %lld %lld %lld %lld %lld",
            &cpuinfo.user, &cpuinfo.nice, &cpuinfo.system, &cpuinfo.idle, &cpuinfo.iowait,
            &cpuinfo.irq, &cpuinfo.softirq, &cpuinfo.steal, &cpuinfo.guest, &cpuinfo.guest_nice);
 
-    unsigned long long cpu_idle_time = cpuinfo.idle + cpuinfo.iowait;
-    unsigned long long cpu_non_idle_time = cpuinfo.user + cpuinfo.nice + cpuinfo.system + cpuinfo.idle
+    /* Compute actual CPU time */
+    long long cpu_idle_time = cpuinfo.idle + cpuinfo.iowait;
+    long long cpu_non_idle_time = cpuinfo.user + cpuinfo.nice + cpuinfo.system + cpuinfo.idle
                                         + cpuinfo.iowait + cpuinfo.irq + cpuinfo.softirq + cpuinfo.steal;
 
-    unsigned long long cpu_usage_time = cpu_non_idle_time - cpu_idle_time;
-    unsigned long long cpu_percentage = cpu_usage_time / cpu_non_idle_time * 100;    
+    /* CPU usage */
+    long long cpu_usage_time = cpu_non_idle_time + cpu_idle_time;
+    long long prev_cpu_usage_time = prev_cpu_non_idle_time + prev_cpu_idle_time;
 
-    asprintf(&result, "%16llu", cpu_percentage);
+    /* Total usage */
+    long long cpu_totald = cpu_usage_time - prev_cpu_usage_time;
+    long long cpu_idled = cpu_idle_time - prev_cpu_idle_time;
+
+    double cpu_percentage = (double)(cpu_totald - cpu_idled) / (double)cpu_totald * 100.0;  
+    asprintf(&result, "%.0lf%%\n", cpu_percentage);
+
+    /* Save actual cpu time to prev */
+    prev_cpu_idle_time = cpu_idle_time;
+    prev_cpu_non_idle_time = cpu_non_idle_time;
+
     return result;
 }
 
@@ -139,14 +156,14 @@ char *get_memory_usage()
     char *result;
 
     if ((mem_f = fopen("/proc/meminfo", "r")) == NULL) {
-        perror("Could not open /proc/meminfo file");
+        syslog(LOG_ERR, "Could not open /proc/meminfo file");
         return NULL;
     }
 
     /* Parsing only the first five lines of /proc/meminfo */
     for (int i = 0; i < 5; ++i) {
         if (getline(&line, &len, mem_f) == -1) {
-            perror("Could not read /proc/meminfo file");
+            syslog(LOG_ERR, "Could not read /proc/meminfo file");
             fclose(mem_f);
             return NULL;
         }
@@ -172,7 +189,7 @@ char *get_memory_usage()
 
     /* Compute memory usage */
     mem_used = meminfo.mem_total - meminfo.mem_free - meminfo.mem_buffered - meminfo.mem_cached;
-    asprintf(&result, "%d", mem_used);
+    asprintf(&result, "%d kB\n", mem_used);
 
     fclose(mem_f);
     return result;
@@ -206,7 +223,7 @@ void *server_run()
 
     /* Read message from client */
     if (read(socket_id, recv_buffer, sizeof(recv_buffer)) < 0) {
-        fprintf(stderr, "Error reading socket\n");
+        syslog(LOG_ERR, "Error reading socket");
         return NULL;
     }
 
@@ -218,7 +235,7 @@ void *server_run()
 
     /* Send a reply to a client */
     if ( write(socket_id, send_buffer, strlen(send_buffer) * sizeof(char) ) < 0 ) {
-        fprintf(stderr, "Error writing to socket\n");
+        syslog(LOG_ERR, "Error writing to socket");
         free(send_buffer);
         return NULL;
     }
@@ -226,7 +243,7 @@ void *server_run()
     
     /* close connection, clean up socket */
     if (close(socket_id) < 0) {
-        fprintf(stderr, "Error closing the socket");
+        syslog(LOG_ERR, "Error closing socket");
         return NULL;
     }
 
@@ -275,7 +292,7 @@ static void daemonize()
     }
 
     /* Open the log file */
-    // openlog ("firstdaemon", LOG_PID, LOG_DAEMON);
+    openlog("simple_linux_daemon", LOG_PID, LOG_DAEMON);
 }
 
 
@@ -290,7 +307,7 @@ int create_connection(const int port_num, struct sockaddr_in *sin, int *listenfd
 {
     // Create socket
     if ( (*listenfd = socket(PF_INET, SOCK_STREAM, 0 ) ) < 0) {
-        fprintf(stderr, "Error creating socket\n");
+        syslog(LOG_ERR, "Error creating socket");
         return ERR_COMM;
     }
     sin->sin_family = PF_INET;              /* set protocol family to Internet */
@@ -299,13 +316,13 @@ int create_connection(const int port_num, struct sockaddr_in *sin, int *listenfd
 
     // Bind socket
     if (bind(*listenfd, (struct sockaddr *)sin, sizeof(*sin) ) < 0 ) {
-        fprintf(stderr, "Error on bind\n");
+        syslog(LOG_ERR, "Error on bind");
         return ERR_COMM;
     }
 
     // Pasive open - listen
     if (listen(*listenfd, 5)) { 
-        fprintf (stderr, "Error on listen\n");
+        syslog(LOG_ERR, "Error on listen");
         return ERR_COMM;
     }
 
@@ -331,7 +348,7 @@ int main(int argc, char const *argv[])
 
     /* Parse arguments - no agruments needed or alowed */
     if (argc > 1) {
-        fprintf(stderr, "No arguments allowed! Run without arguments.\n");
+        syslog(LOG_ERR, "No arguments allowed! Run without arguments.");
         return ERR_ARG;
     }
     UNUSED(argv);
@@ -347,14 +364,14 @@ int main(int argc, char const *argv[])
 
     /* Creating implicit attribute */
     if ((res = pthread_attr_init(&attr)) != 0) {
-        printf("pthread_attr_init() err %d\n", res);
-        return 1;
+        syslog(LOG_ERR, "pthread_attr_init() err %d\n", res);
+        return ERR_INTERNAL;
     }
 
     /* Type of thread in atributes */
     if ((res = pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED)) != 0) {
-        printf("pthread_attr_setdetachstate() err %d\n", res);
-        return 1;
+        syslog(LOG_ERR, "pthread_attr_setdetachstate() err %d\n", res);
+        return ERR_INTERNAL;
     } 
 
     /* Server infinite loop */
@@ -375,5 +392,6 @@ int main(int argc, char const *argv[])
 
     }
 
+    closelog();
     return ERR_OK;
 }
